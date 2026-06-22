@@ -215,40 +215,56 @@ function ok(text: string) {
 const app = express();
 app.use(express.json());
 
+app.use((_req, res, next) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, mcp-session-id");
+  if (_req.method === "OPTIONS") { res.sendStatus(204); return; }
+  next();
+});
+
 app.get("/", (_req, res) => {
   res.send("d365-write-mcp is running.");
 });
 
-// Keep one transport+server per session, keyed by session id.
-const sessions = new Map<string, { server: Server; transport: StreamableHTTPServerTransport }>();
+// ---- Anthropic proxy (avoids browser CORS restrictions in artifacts) -----
 
-async function handleMcp(req: express.Request, res: express.Response) {
-  const sessionId = req.headers["mcp-session-id"] as string | undefined;
-
-  let entry = sessionId ? sessions.get(sessionId) : undefined;
-
-  if (!entry) {
-    // New session (this should be an "initialize" request)
-    const server = buildServer();
-    const transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: () => randomUUID(),
-      onsessioninitialized: (newId) => {
-        sessions.set(newId, { server, transport });
-      },
-    });
-    transport.onclose = () => {
-      if (transport.sessionId) sessions.delete(transport.sessionId);
-    };
-    await server.connect(transport);
-    entry = { server, transport };
+app.post("/proxy", async (req, res) => {
+  const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+  if (!ANTHROPIC_API_KEY) {
+    res.status(500).json({ error: { message: "ANTHROPIC_API_KEY not set on server." } });
+    return;
   }
+  try {
+    const response = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+        "anthropic-beta": "mcp-client-2025-04-04",
+      },
+      body: JSON.stringify(req.body),
+    });
+    const data = await response.json();
+    res.status(response.status).json(data);
+  } catch (err: any) {
+    res.status(500).json({ error: { message: err.message } });
+  }
+});
 
-  await entry.transport.handleRequest(req, res, req.body);
-}
-
-app.post("/mcp", handleMcp);
-app.get("/mcp", handleMcp);
-app.delete("/mcp", handleMcp);
+app.post("/mcp", async (req, res) => {
+  const server = buildServer();
+  const transport = new StreamableHTTPServerTransport({
+    sessionIdGenerator: () => randomUUID(),
+  });
+  res.on("close", () => {
+    transport.close();
+    server.close();
+  });
+  await server.connect(transport);
+  await transport.handleRequest(req, res, req.body);
+});
 
 const PORT = process.env.PORT ? Number(process.env.PORT) : 3000;
 app.listen(PORT, () => {
