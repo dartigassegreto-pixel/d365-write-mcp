@@ -219,18 +219,36 @@ app.get("/", (_req, res) => {
   res.send("d365-write-mcp is running.");
 });
 
-app.post("/mcp", async (req, res) => {
-  const server = buildServer();
-  const transport = new StreamableHTTPServerTransport({
-    sessionIdGenerator: () => randomUUID(),
-  });
-  res.on("close", () => {
-    transport.close();
-    server.close();
-  });
-  await server.connect(transport);
-  await transport.handleRequest(req, res, req.body);
-});
+// Keep one transport+server per session, keyed by session id.
+const sessions = new Map<string, { server: Server; transport: StreamableHTTPServerTransport }>();
+
+async function handleMcp(req: express.Request, res: express.Response) {
+  const sessionId = req.headers["mcp-session-id"] as string | undefined;
+
+  let entry = sessionId ? sessions.get(sessionId) : undefined;
+
+  if (!entry) {
+    // New session (this should be an "initialize" request)
+    const server = buildServer();
+    const transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: () => randomUUID(),
+      onsessioninitialized: (newId) => {
+        sessions.set(newId, { server, transport });
+      },
+    });
+    transport.onclose = () => {
+      if (transport.sessionId) sessions.delete(transport.sessionId);
+    };
+    await server.connect(transport);
+    entry = { server, transport };
+  }
+
+  await entry.transport.handleRequest(req, res, req.body);
+}
+
+app.post("/mcp", handleMcp);
+app.get("/mcp", handleMcp);
+app.delete("/mcp", handleMcp);
 
 const PORT = process.env.PORT ? Number(process.env.PORT) : 3000;
 app.listen(PORT, () => {
