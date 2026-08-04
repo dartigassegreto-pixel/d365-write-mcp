@@ -1,6 +1,5 @@
 import "dotenv/config";
 import express from "express";
-import { randomUUID } from "node:crypto";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import {
@@ -254,9 +253,10 @@ app.post("/proxy", async (req, res) => {
 });
 
 app.post("/mcp", async (req, res) => {
+  console.log(`[mcp] ${req.body?.method ?? "unknown method"} id=${req.body?.id ?? "-"}`);
   const server = buildServer();
   const transport = new StreamableHTTPServerTransport({
-    sessionIdGenerator: () => randomUUID(),
+    sessionIdGenerator: undefined,
   });
   res.on("close", () => {
     transport.close();
